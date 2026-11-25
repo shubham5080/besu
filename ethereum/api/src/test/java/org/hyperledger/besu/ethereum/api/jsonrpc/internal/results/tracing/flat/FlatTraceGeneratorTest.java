@@ -200,6 +200,49 @@ public class FlatTraceGeneratorTest {
   }
 
   @Test
+  public void truncatedOutOfGasCreateUsesTransactionResultNotOpenContext() {
+    // --rpc-max-trace-steps can end the frame list mid-initcode (e.g. an infinite JUMP loop).
+    // The open create context must not be reported as a successful deploy with gasUsed 0.
+    final Bytes initCode = Bytes.fromHexString("0x5b600056");
+    Mockito.when(transaction.getSender()).thenReturn(Address.ZERO);
+    Mockito.when(transaction.getNonce()).thenReturn(0L);
+    Mockito.when(transaction.getTo()).thenReturn(Optional.empty());
+    Mockito.when(transaction.getInit()).thenReturn(Optional.of(initCode));
+    Mockito.when(transactionProcessingResult.isSuccessful()).thenReturn(false);
+    Mockito.when(transactionProcessingResult.getExceptionalHaltReason())
+        .thenReturn(Optional.of(ExceptionalHaltReason.INSUFFICIENT_GAS));
+    Mockito.when(transactionProcessingResult.getRevertReason()).thenReturn(Optional.empty());
+    Mockito.when(transactionProcessingResult.getGasRemaining()).thenReturn(0L);
+    Mockito.when(transactionProcessingResult.getOutput()).thenReturn(Bytes.EMPTY);
+
+    final TraceFrame firstStep =
+        TraceFrame.builder()
+            .setOpcode("JUMPDEST")
+            .setOpcodeNumber(0x5b)
+            .setDepth(0)
+            .setGasRemaining(4_000_000L)
+            .setGasCost(OptionalLong.of(1L))
+            .setValue(Wei.ZERO)
+            .setInputData(initCode)
+            .setOutputData(Bytes.EMPTY)
+            .build();
+
+    final TransactionTrace transactionTrace =
+        new TransactionTrace(transaction, transactionProcessingResult, List.of(firstStep));
+
+    final FlatTrace trace =
+        (FlatTrace)
+            FlatTraceGenerator.generateFromTransactionTrace(
+                    null, transactionTrace, null, new AtomicInteger())
+                .toList()
+                .getFirst();
+
+    Assertions.assertThat(trace.getType()).isEqualTo("create");
+    Assertions.assertThat(trace.getError()).isEqualTo("Out of gas");
+    Assertions.assertThat(trace.getResult()).isNull();
+  }
+
+  @Test
   public void nestedCreateEndingInSelfDestructReportsEmptyCode() {
     final Address created = Address.fromHexString("0x0000000000000000000000000000000000001234");
     final Bytes initCode = Bytes.fromHexString("0x6000ff");

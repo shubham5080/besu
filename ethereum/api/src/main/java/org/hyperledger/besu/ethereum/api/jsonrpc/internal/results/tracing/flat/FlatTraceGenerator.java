@@ -214,7 +214,53 @@ public class FlatTraceGenerator {
       }
     }
 
+    // A step limit (or other early stop) can leave call/create contexts open with no halt/return
+    // frame. Without this, a truncated out-of-gas CREATE is reported as a successful deploy with
+    // gasUsed 0. Finish open contexts from the real transaction result instead.
+    closeOpenContextsFromTransactionResult(tracesContexts, transactionTrace);
+
     return flatTraces.stream().peek(consumer).map(FlatTrace.Builder::build);
+  }
+
+  /**
+   * Applies the transaction processing result to any call/create contexts still on the stack when
+   * the frame walk ends early (for example when {@code --rpc-max-trace-steps} truncates the trace).
+   */
+  private static void closeOpenContextsFromTransactionResult(
+      final Deque<FlatTrace.Context> tracesContexts, final TransactionTrace transactionTrace) {
+    if (tracesContexts.isEmpty()) {
+      return;
+    }
+    final var result = transactionTrace.getResult();
+    final Optional<String> error =
+        result.isSuccessful()
+            ? Optional.empty()
+            : result
+                .getExceptionalHaltReason()
+                .map(ExceptionalHaltReason::getDescription)
+                .or(() -> result.getRevertReason().map(bytes -> "Reverted"));
+
+    final long rootGasUsed =
+        transactionTrace.getTraceFrames().isEmpty()
+            ? 0L
+            : Math.max(
+                0L,
+                transactionTrace.getTraceFrames().get(0).getGasRemaining()
+                    - result.getGasRemaining());
+
+    while (!tracesContexts.isEmpty()) {
+      final FlatTrace.Context context = tracesContexts.removeLast();
+      final boolean isRoot = tracesContexts.isEmpty();
+      if (error.isPresent() && context.getBuilder().getError().isEmpty()) {
+        context.getBuilder().error(error);
+      }
+      if (isRoot && context.getGasUsed() <= 0 && rootGasUsed > 0) {
+        context.setGasUsed(rootGasUsed);
+      }
+      if (!tracesContexts.isEmpty()) {
+        tracesContexts.peekLast().getBuilder().incSubTraces();
+      }
+    }
   }
 
   /**
